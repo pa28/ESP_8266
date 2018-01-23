@@ -91,9 +91,13 @@ const int   serialSpeed = 115200;         // Serial baud rate if used
 
 float temperature = 0;                    // Storage for temperature reading
 float humidity = 0;                       // Storage for humidity reading
-uint32_t delayMS;
-bool tempOk = false;
-bool humiOk = false;
+uint32_t delayMS;                         // Delay needed for DHT11
+bool tempOk = false;                      // Temperature read success
+bool humiOk = false;                      // Humidity read success
+
+// Assembly strings for sending data to influxdb
+String prefix, tempData, humiData, voltage;
+
 /*
  * DHT11 unified library object
  */
@@ -242,6 +246,22 @@ void loop()
       humiOk = true;
       humidity = event.relative_humidity;
     }
+
+    /*
+     * Read the analog input pin which is connected to a voltage divider
+     * across the power supply
+     */
+    int ad = 0;
+    for (int i = 0; i < 16; ++i) {
+      ad += analogRead(A0);
+    }
+
+    /*
+     * Compute the power supply voltage. 14050 is the value returned when the
+     * device is powered by the regulated 5VDC from the USB connection.
+     */
+    float volts = (float)ad / 14050.0 * 5.0;
+
 #if SERIAL
     if (humiOk) {
       Serial.print("Humidity ");
@@ -251,6 +271,9 @@ void loop()
       Serial.print("Temperature ");
       Serial.println(temperature,1);
     }
+
+    Serial.print("ADC: ");
+    Serial.println(ad);
 #endif
     
 
@@ -278,8 +301,14 @@ void loop()
     {
       digitalWrite(LED_PIN, LED_OFF);
 
-      String tempData = "environment,sensor=" + wifi.hostname() + ",room=test temperature=" + temperature + '\n';
-      String humiData = "environment,sensor=" + wifi.hostname() + ",room=test humidity=" + humidity + '\n';
+      /*
+       * Construct measurement strings for influxdb
+       */
+      String prefix = "environment,sensor=" + wifi.hostname() + ",room=test ";
+      String tempData = prefix + "temperature=" + temperature + '\n';
+      String humiData = prefix + "humidity=" + humidity + '\n';
+      String analog = prefix + "analog=" + ad + '\n';
+      String voltage = prefix + "voltatage=" + volts + '\n';
 
 #if SERIAL
       Serial.println("connected]");
@@ -287,22 +316,26 @@ void loop()
       Serial.println(String("[Sending a request] POST") + url +  " HTTP/1.1\n" +
                    "Host: " + host + "\n" +
                    "Connection: close\n" +
-                   "Content-Length: " + (tempData.length()+humiData.length()) + "\n" +
+                   "Content-Length: " + (tempData.length()+humiData.length()+analog.length()+voltage.length()) + "\n" +
                    "Content-Type: text/plain\n" +
                    "\n"
                   );
       Serial.print(tempData);
       Serial.print(humiData);
+      Serial.print(analog);
+      Serial.print(voltage);
 #endif
       client.print(String("POST ") + url + " HTTP/1.1\r\n" +
                    "Host: " + host + "\r\n" +
                    "Connection: close\r\n" +
-                   "Content-Length: " + (tempData.length()+humiData.length()) + "\r\n" +
+                   "Content-Length: " + (tempData.length()+humiData.length()+analog.length()+voltage.length()) + "\r\n" +
                    "Content-Type: text/plain\r\n" +
                    "\r\n"
                   );
       client.print(tempData);
       client.print(humiData);
+      client.print(analog);
+      client.print(voltage);
       
       /*
        * Collect the response from the host.
