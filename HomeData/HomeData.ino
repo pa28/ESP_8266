@@ -88,12 +88,18 @@ const int   successDelay = 60e3;          // Delay if reading successfully sent 
 const int   failDelay = 5e3;              // Delay if reading unsuccessfull (mS)
 const int   notConnectedDelay = 10e3;     // Delay if not connected to hot spot (mS)
 const int   serialSpeed = 115200;         // Serial baud rate if used
+const float voltageCalibration = 13280.0; // Calibration value for 5.0 VDC
 
 float temperature = 0;                    // Storage for temperature reading
 float humidity = 0;                       // Storage for humidity reading
 uint32_t delayMS;                         // Delay needed for DHT11
 bool tempOk = false;                      // Temperature read success
 bool humiOk = false;                      // Humidity read success
+int readingCount = 0;                     // Count the number of times through the reading loop
+int nTemp = 0;
+int nHumi = 0;
+int adReading = 0;
+
 
 // Assembly strings for sending data to influxdb
 String prefix, tempData, humiData, voltage;
@@ -108,6 +114,14 @@ DHT_Unified dhtObj(DHT11_PIN, DHT11);
  * Setup
  */
 void setup() {
+  temperature = 0;                    // Storage for temperature reading
+  humidity = 0;                       // Storage for humidity reading
+  tempOk = false;                     // Temperature read success
+  humiOk = false;                     // Humidity read success
+  readingCount = 0;                   // Count the number of times through the reading loop
+  nTemp = 0;
+  nHumi = 0;
+  adReading = 0;
 
   /*
    * If SERIAL is set to 1 configure serial output.
@@ -221,46 +235,70 @@ void loop()
    */
   boolean readingSuccess = false;
 
+  if (readingCount >= 16) {
+    temperature = 0;                    // Storage for temperature reading
+    humidity = 0;                       // Storage for humidity reading
+    tempOk = false;                     // Temperature read success
+    humiOk = false;                     // Humidity read success
+    readingCount = 0;                   // Count the number of times through the reading loop
+    nTemp = 0;
+    nHumi = 0;
+    adReading = 0;
+  }
+
   /*
    * Run WiFi monitoring
    */
   monitorWiFi();
 
   /*
+   * Reading loop (distributed across calls to loop()
+   */
+
+  if (readingCount & 0x1)
+    digitalWrite(LED_PIN, LED_OFF);
+  else
+    digitalWrite(LED_PIN, LED_ON);
+
+  /*
+   * Read the DHT11
+   *
+   */
+  delay(delayMS);
+  sensors_event_t event;
+  dhtObj.temperature().getEvent(&event);
+  if (!isnan(event.temperature)) {
+    tempOk = true;
+    temperature += event.temperature;
+    nTemp++;
+  }
+  dhtObj.humidity().getEvent(&event);
+  if (!isnan(event.relative_humidity)) {
+    humiOk = true;
+    humidity += event.relative_humidity;
+    nHumi++;
+  }
+
+  /*
+   * Read the analog input pin which is connected to a voltage divider
+   * across the power supply
+   */
+  adReading += analogRead(A0);
+
+  if (++readingCount < 16)
+    return;
+
+  /*
    * Only do processing if the connection is alive
    */
   if (connectionWasAlive) {
     /*
-     * Read the DHT11
-     * 
-     */
-    delay(delayMS);
-    sensors_event_t event;
-    dhtObj.temperature().getEvent(&event);
-    if (!isnan(event.temperature)) {
-      tempOk = true;
-      temperature = event.temperature;
-    }
-    dhtObj.humidity().getEvent(&event);
-    if (!isnan(event.relative_humidity)) {
-      humiOk = true;
-      humidity = event.relative_humidity;
-    }
-
-    /*
-     * Read the analog input pin which is connected to a voltage divider
-     * across the power supply
-     */
-    int ad = 0;
-    for (int i = 0; i < 16; ++i) {
-      ad += analogRead(A0);
-    }
-
-    /*
      * Compute the power supply voltage. 14050 is the value returned when the
      * device is powered by the regulated 5VDC from the USB connection.
      */
-    float volts = (float)ad / 14050.0 * 5.0;
+    float volts = (float)(adReading * 5) / voltageCalibration + 0.005;
+    humidity = humidity / nHumi + 0.005;
+    temperature = temperature / nTemp + 0.005;
 
 #if SERIAL
     if (humiOk) {
@@ -273,7 +311,7 @@ void loop()
     }
 
     Serial.print("ADC: ");
-    Serial.println(ad);
+    Serial.println(adReading);
 #endif
     
 
@@ -299,7 +337,6 @@ void loop()
     if (client.connect(host, httpPort))
 #endif
     {
-      digitalWrite(LED_PIN, LED_OFF);
 
       /*
        * Construct measurement strings for influxdb
@@ -307,7 +344,7 @@ void loop()
       String prefix = "environment,sensor=" + wifi.hostname() + ",room=test ";
       String tempData = prefix + "temperature=" + temperature + '\n';
       String humiData = prefix + "humidity=" + humidity + '\n';
-      String analog = prefix + "analog=" + ad + '\n';
+      String analog = prefix + "analog=" + adReading + '\n';
       String voltage = prefix + "voltatage=" + volts + '\n';
 
 #if SERIAL
